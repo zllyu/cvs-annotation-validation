@@ -1,11 +1,27 @@
 import cv2
 import os
 import argparse
+from datetime import datetime
+
+
+SUCCESS_LOG = "success_videos.txt"
+FAIL_LOG = "error_videos.txt"
+PROCESSING_LOG = "video_processing.log"
+
+
+def log_message(message):
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with open(PROCESSING_LOG, 'a') as log_file:
+        log_file.write(f"{timestamp} - {message}\n")
 
 
 def get_video_info(cap):
+    if not cap.isOpened():
+        return None, None, None  # Indicates the video couldn't be opened
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if fps == 0:  # Prevent division by zero
+        return None, None, None  # Indicates an error in reading FPS
     video_duration = total_frames / fps
     return fps, total_frames, video_duration
 
@@ -32,56 +48,84 @@ def trim_video(cap, fps, output_path):
     out.release()
 
 
-def process_video(video_path, new_video_dir):
+def read_processed_videos():
+    if os.path.exists(SUCCESS_LOG):
+        with open(SUCCESS_LOG, 'r') as file:
+            return set(file.read().splitlines())
+    return set()
+
+
+def process_video(video_path, new_video_dir, processed_videos):
     video_name = os.path.basename(video_path)
+    if video_name in processed_videos:
+        log_message(f"Skipping {video_name}: already processed")
+        return
+
     if not video_name.lower().endswith('.mp4'):
-        print(f"Skipping {video_name}: not an .mp4 file")
+        log_message(f"Skipping {video_name}: not an .mp4 file")
         return
     
-    new_video_path = os.path.join(new_video_dir, video_name)
+    # Define paths for trimmed and untrimmed subdirectories
+    trimmed_path = os.path.join(new_video_dir, "success", "trimmed")
+    untrimmed_path = os.path.join(new_video_dir, "success", "untrimmed")
 
-    # get the original video's information
-    cap_old = cv2.VideoCapture(video_path)
-    fps_old, total_frames_old, video_duration_old = get_video_info(cap_old)
+    # Create the subdirectories if they do not exist
+    os.makedirs(trimmed_path, exist_ok=True)
+    os.makedirs(untrimmed_path, exist_ok=True)
+    
+    cap = cv2.VideoCapture(video_path)
+    fps, total_frames, _ = get_video_info(cap)
 
-    # decide whether the video needs to be trimmed
-    if total_frames_old <= 2700:
-        print(f"Video {video_name} doesn't need to be trimmed.")
-        cap_old.release()
+    if fps is None or total_frames is None:
+        output_path = os.path.join(new_video_dir, "fail", video_name)
+        log_message(f"Failed to process {video_name}: unable to read video information or corrupted file.")
+        if not os.path.exists(output_path):
+            os.rename(video_path, output_path)  # Move corrupted or unreadable files to 'fail' directory
+        cap.release()
+        with open(FAIL_LOG, 'a') as file:
+            file.write(f"{video_name}\n")
         return
-    
-    print(f"### Before\n {video_name} Duration: {video_duration_old} seconds, Total Frames: {total_frames_old}")
-    
-    # trim the video to exact 90 seconds
-    trim_video(cap_old, fps_old, new_video_path)
 
-    # print out trimmed video's information
-    cap_new = cv2.VideoCapture(new_video_path)
-    _, total_frames_new, video_duration_new = get_video_info(cap_new)
-    print(f"### After\n {video_name} Duration: {video_duration_new} seconds, Total Frames: {total_frames_new}")
+    if total_frames == 2700:
+        output_path = os.path.join(untrimmed_path, video_name)
+        os.rename(video_path, output_path)
+        log_message(f"Video {video_name} is correct length, no trim needed.")
+        with open(SUCCESS_LOG, 'a') as file:
+            file.write(f"{video_name}\n")
+    elif total_frames > 2700:
+        output_path = os.path.join(trimmed_path, video_name)
+        trim_video(cap, fps, output_path)
+        log_message(f"Trimmed {video_name} to 2700 frames. Original frames: {total_frames}.")
+        with open(SUCCESS_LOG, 'a') as file:
+            file.write(f"{video_name}\n")
+    else:
+        output_path = os.path.join(new_video_dir, "fail", video_name)
+        os.rename(video_path, output_path)
+        log_message(f"Video {video_name} has less than 2700 frames, marked as error. Original frames: {total_frames}.")
+        with open(FAIL_LOG, 'a') as file:
+            file.write(f"{video_name}\n")
 
-    # release resources
-    cap_old.release()
-    cap_new.release()
+    cap.release()
 
 
 def main(source_path, new_video_dir):
-    if not os.path.exists(new_video_dir):
-        os.makedirs(new_video_dir)
+    success_dir = os.path.join(new_video_dir, "success")
+    fail_dir = os.path.join(new_video_dir, "fail")
+    os.makedirs(success_dir, exist_ok=True)
+    os.makedirs(fail_dir, exist_ok=True)
+
+    processed_videos = read_processed_videos()
 
     if os.path.isdir(source_path):
-        # batch
         for video_name in os.listdir(source_path):
             video_path = os.path.join(source_path, video_name)
-            if os.path.isfile(video_path) and video_path.lower().endswith('.mp4'):
-                process_video(video_path, new_video_dir)
+            process_video(video_path, new_video_dir, processed_videos)
     elif os.path.isfile(source_path) and source_path.lower().endswith('.mp4'):
-        # single video
-        process_video(source_path, new_video_dir)
+        process_video(source_path, new_video_dir, processed_videos)
     else:
-        print("The specified source path does not exist or is not an .mp4 file.")
-
-    cv2.destroyAllWindows()
+        log_message("The specified source path does not exist or is not an .mp4 file.")
+    
+    log_message("... LOG END ...")
 
 
 if __name__ == "__main__":
